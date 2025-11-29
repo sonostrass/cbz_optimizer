@@ -1,33 +1,32 @@
-# MULTI-THREADED CBZ OPTIMIZER (SIMULATION MODE, ADAPTED)
-# This script DOES NOT modify any CBZ files.
-# It only simulates size changes and status in cbz_status.csv.
+[CmdletBinding()]
+param(
+    [string]$InputList = "unattended_cbz.txt",
+    [string]$CsvFile   = "cbz_status.csv",
+    [int]$ThrottleLimit = 4
+)
 
-$inputList = "unattended_cbz.txt"
-$csvFile   = "cbz_status.csv"
-
-if (!(Test-Path $csvFile)) {
-    "cbz;original_size;compression_date;status;optimized_size" | Out-File $csvFile -Encoding UTF8
+# Create CSV file if it does not exist
+if (-not (Test-Path -LiteralPath $CsvFile)) {
+    "cbz;original_size;compression_date;status;optimized_size" | Out-File -LiteralPath $CsvFile -Encoding UTF8
 }
 
-$csv = Import-Csv $csvFile -Delimiter ";"
-$cbzList = Get-Content $inputList | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+if (-not (Test-Path -LiteralPath $InputList)) {
+    Write-Error "Input list '$InputList' not found."
+    exit 1
+}
+
+$cbzList = Get-Content -LiteralPath $InputList -ErrorAction Stop
+
+Write-Host "Starting CBZ optimization SIMULATION with throttle limit $ThrottleLimit"
 
 $cbzList | ForEach-Object -Parallel {
+    param($line, $CsvFile)
 
-    param($line, $csvFile)
+    $cbzPath = $line.Split(" : ", 2)[0].Trim()
+    if (-not $cbzPath) { return }
 
-    if ([string]::IsNullOrWhiteSpace($line)) {
-        return
-    }
+    $csv = Import-Csv -LiteralPath $CsvFile -Delimiter ";"
 
-    # unattended_cbz.txt lines look like:
-    #   C:\path\file.cbz : some description...
-    $cbzPath = $line.Split(" : ")[0].Trim()
-
-    # Reload CSV inside this runspace
-    $csv = Import-Csv $csvFile -Delimiter ";"
-
-    # Find or create CSV entry
     $entry = $csv | Where-Object { $_.cbz -eq $cbzPath }
     if (-not $entry) {
         $entry = [PSCustomObject]@{
@@ -40,38 +39,43 @@ $cbzList | ForEach-Object -Parallel {
         $csv += $entry
     }
 
-    # Skip if already processed successfully or currently ongoing
     if ($entry.status -eq "success" -or $entry.status -eq "ongoing") {
         return
     }
 
-    # Fill / refresh base information
-    if (Test-Path $cbzPath) {
-        $entry.original_size = (Get-Item $cbzPath).Length
-    } else {
-        # if file is missing, simulate but mark as fail
-        $entry.original_size = 0
-    }
-
-    $entry.compression_date = (Get-Date).ToString("s")
     $entry.status           = "ongoing"
-    $csv | Export-Csv $csvFile -Delimiter ";" -NoTypeInformation -Encoding UTF8
+    $entry.compression_date = (Get-Date).ToString("s")
+    $csv | Export-Csv -LiteralPath $CsvFile -Delimiter ";" -NoTypeInformation -Encoding UTF8
 
-    # --- Simulation of optimization ---
-    # Random factor between 0.5 and 1.2 applied on original size
-    if ($entry.original_size -gt 0) {
-        $rand = Get-Random -Minimum 0.5 -Maximum 1.2
-        $entry.optimized_size = [int]($entry.original_size * $rand)
-    } else {
-        $entry.optimized_size = 0
+    try {
+        if (-not (Test-Path -LiteralPath $cbzPath)) {
+            throw "File not found: $cbzPath"
+        }
+
+        $fileInfo = Get-Item -LiteralPath $cbzPath
+        $originalSize = [int64]$fileInfo.Length
+        $entry.original_size = $originalSize
+
+        # Simulate an optimization factor between 0.70 and 1.10
+        $rand = Get-Random -Minimum 70 -Maximum 111
+        $factor = [double]$rand / 100.0
+
+        $simOptimized = [int64]([math]::Round($originalSize * $factor))
+        $entry.optimized_size = $simOptimized
+
+        if ($simOptimized -lt $originalSize) {
+            $entry.status = "success"
+        }
+        else {
+            $entry.status = "fail"
+        }
     }
-
-    if ($entry.optimized_size -lt $entry.original_size -and $entry.original_size -gt 0) {
-        $entry.status = "success"
-    } else {
+    catch {
         $entry.status = "fail"
+        Write-Warning "Simulation error for $cbzPath : $($_.Exception.Message)"
+    }
+    finally {
+        $csv | Export-Csv -LiteralPath $CsvFile -Delimiter ";" -NoTypeInformation -Encoding UTF8
     }
 
-    $csv | Export-Csv $csvFile -Delimiter ";" -NoTypeInformation -Encoding UTF8
-
-} -ThrottleLimit 4 -ArgumentList $csvFile
+} -ThrottleLimit $ThrottleLimit -ArgumentList $CsvFile
