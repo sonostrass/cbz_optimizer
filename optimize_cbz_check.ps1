@@ -11,7 +11,7 @@ param(
 $allowed = @(".jpg", ".jpeg", ".xml", ".css", ".html")
 
 # On vide le fichier de log au démarrage
-Set-Content -Path $LogFile -Value ""
+Set-Content -Path $LogFile -Value "" -Encoding 1252
 
 # Pour ouvrir les .cbz comme des .zip
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -129,11 +129,7 @@ foreach ($folder in $folders) {
                     # Analyse du contenu ZIP pour trouver des extensions inattendues (résumé par extension)
                     $zip = [System.IO.Compression.ZipFile]::OpenRead($cbz.FullName)
                     try {
-                        # On ne s'intéresse qu'aux IMAGES :
-                        # - totalImgs = toutes les images (jpg/jpeg/png/gif/webp/bmp/tif/tiff)
-                        # - unexpectedImgs = images non-jpg/jpeg (celles à potentiellement convertir)
-                        $unexpectedImgs = @()
-                        $totalImgs      = 0
+                        $unexpectedExts = @()
 
                         foreach ($entry in $zip.Entries) {
                             if ([string]::IsNullOrWhiteSpace($entry.FullName)) { continue }
@@ -141,40 +137,27 @@ foreach ($folder in $folders) {
 
                             $ext = [System.IO.Path]::GetExtension($entry.FullName).ToLowerInvariant()
 
-                            # Image ?
-                            if ($ext -match '^\.(jpg|jpeg|png|gif|webp|bmp|tif|tiff)$') {
-                                $totalImgs++
-
-                                # Image inattendue = non jpg/jpeg
-                                if ($ext -ne ".jpg" -and $ext -ne ".jpeg") {
-                                    $unexpectedImgs += $ext
-                                }
+                            if (-not $allowed.Contains($ext)) {
+                                $unexpectedExts += $ext
                             }
                         }
 
-                        # Règle 10% : si les images inattendues représentent <10% du total des images
-                        # on ne fait rien (CBZ considéré comme OK).
-                        if ($totalImgs -gt 0 -and $unexpectedImgs.Count -gt 0) {
-                            $ratio = [double]$unexpectedImgs.Count / [double]$totalImgs
+                        if ($unexpectedExts.Count -gt 0) {
+                            $grouped = $unexpectedExts |
+                                Group-Object |
+                                ForEach-Object { "{0}:{1}" -f $_.Name.TrimStart('.'), $_.Count }
 
-                            if ($ratio -ge 0.10) {
-                                $grouped = $unexpectedImgs |
-                                    Group-Object |
-                                    ForEach-Object { "{0}:{1}" -f $_.Name.TrimStart('.'), $_.Count }
+                            $summary = $grouped -join ", "
+                            $msg = "$($cbz.FullName) : inattendu -> $summary"
 
-                                $summary = $grouped -join ", "
-                                $msg = "$($cbz.FullName) : inattendu -> $summary"
-
-                                # KO → on garde la ligne et on log
-                                Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
-                                Add-Content -Path $LogFile -Value $msg -Encoding 1252
-                            }
-                            else {
-                                # <10% : considéré comme OK, rien à écrire
-                            }
+                            # KO → on garde la ligne et on log
+                            Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
+                            Add-Content -Path $LogFile -Value $msg -Encoding 1252
                         }
                         else {
-                            # Pas d'images ou pas d'images inattendues : considéré comme OK
+                            # CBZ OK : on log en silence, sans casser la progression
+                            $msg = "$($cbz.FullName) : OK"
+                            Add-Content -Path $LogFile -Value $msg -Encoding 1252
                         }
                     }
                     finally {
@@ -184,24 +167,24 @@ foreach ($folder in $folders) {
                 "rar" {
                     $msg = "$($cbz.FullName) : faux CBZ (archive RAR)"
                     Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
-                    Add-Content -Path $LogFile -Value $msg
+                    Add-Content -Path $LogFile -Value $msg -Encoding 1252
                 }
                 "missing" {
                     $msg = "$($cbz.FullName) : fichier introuvable (signalé mais disparu)"
                     Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
-                    Add-Content -Path $LogFile -Value $msg
+                    Add-Content -Path $LogFile -Value $msg -Encoding 1252
                 }
                 default {
                     $msg = "$($cbz.FullName) : en-tête binaire inattendu (ni ZIP ni RAR)"
                     Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
-                    Add-Content -Path $LogFile -Value $msg
+                    Add-Content -Path $LogFile -Value $msg -Encoding 1252
                 }
             }
         }
         catch {
             $msg = "$($cbz.FullName) : erreur pendant l'analyse - $($_.Exception.Message)"
             Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
-            Add-Content -Path $LogFile -Value $msg
+            Add-Content -Path $LogFile -Value $msg -Encoding 1252
         }
 
         # Après chaque CBZ, la progression sera réaffichée à la prochaine itération

@@ -65,20 +65,23 @@ if (-not $magickAvailable) {
 # Extensions for images that may be converted to JPG (JPG/JPEG are intentionally excluded)
 $imageExts = ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff"
 
-# Build jobs list from unattended_cbz.txt
+# Build jobs list from unattended_cbz.txt, skipping already-successful/ongoing entries
 $rawLines = Get-Content -Path $InputList -Encoding 1252 | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
-# Build jobs list from unattended_cbz.txt
-$jobs = for ($i = 0; $i -lt $rawLines.Count; $i++) {
-    $line = $rawLines[$i]
+$jobs = foreach ($line in $rawLines) {
     $cbzPath = $line.Split(" : ")[0].Trim()
     if (-not $cbzPath) { continue }
 
+    if ($existingMap.ContainsKey($cbzPath)) {
+        $s = $existingMap[$cbzPath].status
+        if ($s -eq "success" -or $s -eq "ongoing") {
+            continue
+        }
+    }
+
     [PSCustomObject]@{
-        Index = $i + 1
-        Total = $rawLines.Count
-        Line  = $line
-        Cbz   = $cbzPath
+        Line = $line
+        Cbz  = $cbzPath
     }
 }
 
@@ -90,9 +93,6 @@ if (-not $jobs -or $jobs.Count -eq 0) {
 # Parallel processing block
 $results = $jobs | ForEach-Object -Parallel {
     $job = $_
-
-    # Per-job progress display
-    Write-Host "[REAL] $($job.Index)/$($job.Total) - $($job.Cbz)"
 
     # --- Local helper: detect archive type based on signature ---
     function Get-CbzArchiveType {
