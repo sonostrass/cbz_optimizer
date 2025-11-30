@@ -66,7 +66,7 @@ if (-not $magickAvailable) {
 $imageExts = ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff"
 
 # Build jobs list from unattended_cbz.txt, skipping already-successful/ongoing entries
-$rawLines = Get-Content -Path $InputList -Encoding Default | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+$rawLines = Get-Content -Path $InputList -Encoding 1252 | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
 $jobs = foreach ($line in $rawLines) {
     $cbzPath = $line.Split(" : ")[0].Trim()
