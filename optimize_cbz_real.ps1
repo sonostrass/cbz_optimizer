@@ -90,9 +90,26 @@ if (-not $jobs -or $jobs.Count -eq 0) {
     exit 0
 }
 
+# Initialize progress tracking
+$jobCount = $jobs.Count
+Write-Host "Processing $jobCount CBZ file(s) in REAL mode..."
+
+$progressState = [hashtable]::Synchronized(@{
+    Total = $jobCount
+    Done  = 0
+})
+
 # Parallel processing block
 $results = $jobs | ForEach-Object -Parallel {
     $job = $_
+
+    # Update progress
+    $using:progressState.Done++
+    $current = $using:progressState.Done
+    if ($using:progressState.Total -gt 0) {
+        $percent = [int](100 * $current / $using:progressState.Total)
+        Write-Progress -Activity "CBZ optimization (REAL)" -Status "Processing $current / $($using:progressState.Total)" -PercentComplete $percent
+    }
 
     # --- Local helper: detect archive type based on signature ---
     function Get-CbzArchiveType {
