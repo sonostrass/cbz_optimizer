@@ -40,7 +40,7 @@ if (Test-Path $CsvFile) {
 }
 
 # Build jobs list from unattended_cbz.txt, skipping already-successful/ongoing entries
-$rawLines = Get-Content $InputList | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+$rawLines = Get-Content -Path $InputList -Encoding Default | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
 $jobs = foreach ($line in $rawLines) {
     $cbzPath = $line.Split(" : ")[0].Trim()
