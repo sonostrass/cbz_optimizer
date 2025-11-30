@@ -68,6 +68,7 @@ $imageExts = ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff"
 # Build jobs list from unattended_cbz.txt, skipping already-successful/ongoing entries
 $rawLines = Get-Content -Path $InputList -Encoding 1252 | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
+$jobIndex = 0
 $jobs = foreach ($line in $rawLines) {
     $cbzPath = $line.Split(" : ")[0].Trim()
     if (-not $cbzPath) { continue }
@@ -79,9 +80,11 @@ $jobs = foreach ($line in $rawLines) {
         }
     }
 
+    $jobIndex++
     [PSCustomObject]@{
-        Line = $line
-        Cbz  = $cbzPath
+        Index = $jobIndex
+        Line  = $line
+        Cbz   = $cbzPath
     }
 }
 
@@ -92,21 +95,13 @@ if (-not $jobs -or $jobs.Count -eq 0) {
 
 # Parallel processing block
 
-# Shared progress counter across parallel runspaces
-Add-Type -TypeDefinition @"
-public static class CbzProgressCounter {
-    public static int Counter = 0;
-}
-"@ -ErrorAction SilentlyContinue
-
 $TotalJobs = $jobs.Count
 
 $results = $jobs | ForEach-Object -Parallel {
     $job = $_
 
-    # Increment and display progress (thread-safe across runspaces)
-    $currentIndex = [System.Threading.Interlocked]::Increment([ref][CbzProgressCounter]::Counter)
-    Write-Host ("[REAL] {0}/{1} - {2}" -f $currentIndex, $using:TotalJobs, $job.Cbz) -ForegroundColor Cyan
+    # Display progress based on precomputed job index
+    Write-Host ("[REAL] {0}/{1} - {2}" -f $job.Index, $using:TotalJobs, $job.Cbz) -ForegroundColor Cyan
 
 
 
@@ -202,6 +197,7 @@ $results = $jobs | ForEach-Object -Parallel {
 
         # Detect archive type: ZIP vs RAR (faux CBZ)
         $type = Get-CbzArchiveType -Path $cbzPath
+        $forceReplace = $false
 
         switch ($type) {
             "zip" {
@@ -213,6 +209,8 @@ $results = $jobs | ForEach-Object -Parallel {
                 }
                 # Faux CBZ -> extract with 7z, then re-compress into a proper CBZ
                 & 7z x -y "-o$tmp" -- "$cbzPath" | Out-Null
+                # Archive was RAR/CBR -> force container change even if size is not smaller
+                $forceReplace = $true
             }
             "missing" {
                 throw "File reported missing while re-checking: $cbzPath"
@@ -239,7 +237,7 @@ $results = $jobs | ForEach-Object -Parallel {
                         )
                     }
 
-                    & magick "$src" -strip -sampling-factor 4:2:0 -define jpeg:optimize-coding=true -quality 85 "$dst"
+                    & magick "$src" -quality 90 "$dst" 2>$null
                     if ($LASTEXITCODE -eq 0 -and (Test-Path $dst)) {
                         Remove-Item $src -Force
                     }
@@ -289,11 +287,16 @@ $results = $jobs | ForEach-Object -Parallel {
             $result.optimized_size = 0
         }
 
-        if ($result.original_size -gt 0 -and
-            $result.optimized_size -gt 0 -and
-            $result.optimized_size -lt $result.original_size) {
+        if ($forceReplace -and $result.optimized_size -gt 0) {
+            # Container change (faux CBZ -> real CBZ) must always be applied
+            Move-Item -Force $optPath $cbzPath
+            $result.status = "success"
+        }
+        elseif ($result.original_size -gt 0 -and
+                $result.optimized_size -gt 0 -and
+                $result.optimized_size -lt $result.original_size) {
 
-            # Keep optimized file
+            # Keep optimized file only if it is smaller
             Move-Item -Force $optPath $cbzPath
             $result.status = "success"
         }
