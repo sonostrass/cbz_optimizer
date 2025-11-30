@@ -129,7 +129,11 @@ foreach ($folder in $folders) {
                     # Analyse du contenu ZIP pour trouver des extensions inattendues (résumé par extension)
                     $zip = [System.IO.Compression.ZipFile]::OpenRead($cbz.FullName)
                     try {
-                        $unexpectedExts = @()
+                        # On ne s'intéresse qu'aux IMAGES :
+                        # - totalImgs = toutes les images (jpg/jpeg/png/gif/webp/bmp/tif/tiff)
+                        # - unexpectedImgs = images non-jpg/jpeg (celles à potentiellement convertir)
+                        $unexpectedImgs = @()
+                        $totalImgs      = 0
 
                         foreach ($entry in $zip.Entries) {
                             if ([string]::IsNullOrWhiteSpace($entry.FullName)) { continue }
@@ -137,26 +141,40 @@ foreach ($folder in $folders) {
 
                             $ext = [System.IO.Path]::GetExtension($entry.FullName).ToLowerInvariant()
 
-                            if (-not $allowed.Contains($ext)) {
-                                $unexpectedExts += $ext
+                            # Image ?
+                            if ($ext -match '^\.(jpg|jpeg|png|gif|webp|bmp|tif|tiff)$') {
+                                $totalImgs++
+
+                                # Image inattendue = non jpg/jpeg
+                                if ($ext -ne ".jpg" -and $ext -ne ".jpeg") {
+                                    $unexpectedImgs += $ext
+                                }
                             }
                         }
 
-                        if ($unexpectedExts.Count -gt 0) {
-                            $grouped = $unexpectedExts |
-                                Group-Object |
-                                ForEach-Object { "{0}:{1}" -f $_.Name.TrimStart('.'), $_.Count }
+                        # Règle 10% : si les images inattendues représentent <10% du total des images
+                        # on ne fait rien (CBZ considéré comme OK).
+                        if ($totalImgs -gt 0 -and $unexpectedImgs.Count -gt 0) {
+                            $ratio = [double]$unexpectedImgs.Count / [double]$totalImgs
 
-                            $summary = $grouped -join ", "
-                            $msg = "$($cbz.FullName) : inattendu -> $summary"
+                            if ($ratio -ge 0.10) {
+                                $grouped = $unexpectedImgs |
+                                    Group-Object |
+                                    ForEach-Object { "{0}:{1}" -f $_.Name.TrimStart('.'), $_.Count }
 
-                            # KO → on garde la ligne et on log
-                            Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
-                            Add-Content -Path $LogFile -Value $msg -Encoding 1252
+                                $summary = $grouped -join ", "
+                                $msg = "$($cbz.FullName) : inattendu -> $summary"
+
+                                # KO → on garde la ligne et on log
+                                Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
+                                Add-Content -Path $LogFile -Value $msg -Encoding 1252
+                            }
+                            else {
+                                # <10% : considéré comme OK, rien à écrire
+                            }
                         }
                         else {
-                            # CBZ OK : rien à écrire dans $LogFile
-                            # (on ne conserve dans le .txt que les CBZ à modifier)
+                            # Pas d'images ou pas d'images inattendues : considéré comme OK
                         }
                     }
                     finally {
