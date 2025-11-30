@@ -66,7 +66,7 @@ if (-not $jobs -or $jobs.Count -eq 0) {
 
 # Parallel simulation: no CSV I/O inside the parallel block, we only return results
 $results = $jobs | ForEach-Object -Parallel {
-    param($job)
+    $job = $_
 
     $cbzPath = $job.Cbz
 

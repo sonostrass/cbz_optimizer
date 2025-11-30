@@ -92,7 +92,7 @@ if (-not $jobs -or $jobs.Count -eq 0) {
 
 # Parallel processing block
 $results = $jobs | ForEach-Object -Parallel {
-    param($job)
+    $job = $_
 
     # --- Local helper: detect archive type based on signature ---
     function Get-CbzArchiveType {
