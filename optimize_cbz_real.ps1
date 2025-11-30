@@ -1,204 +1,246 @@
-[CmdletBinding()]
+# MULTI-THREADED CBZ OPTIMIZER (REAL MODE, PARALLEL SAFE)
+# Requires:
+# - PowerShell 7 (for ForEach-Object -Parallel)
+# - 7z.exe accessible in PATH (for RAR/CBR extraction of faux CBZ)
+# - ImageMagick "magick" in PATH for image format conversion (PNG/GIF/BMP/WEBP/TIF/TIFF -> JPG)
+#
+# IMPORTANT RULES (as per project specs):
+# - Only non-JPG/JPEG images are converted (PNG, GIF, BMP, WEBP, TIF, TIFF).
+# - Existing JPG/JPEG files are NEVER recompressed to avoid quality loss.
+# - For faux CBZ (RAR/CBR) that already contain only JPG/JPEG, we ONLY change the container
+#   to a proper ZIP-based CBZ, without touching JPG/JPEG data.
+
+using namespace System.IO.Compression
+
 param(
     [string]$InputList = "unattended_cbz.txt",
     [string]$CsvFile   = "cbz_status.csv",
-    [int]$ThrottleLimit = 4
+    [int]   $Throttle  = 4
 )
 
-# Ensure required .NET assembly for ZIP operations is loaded
-Add-Type -AssemblyName System.IO.Compression.FileSystem
+$ErrorActionPreference = "Stop"
 
-# Create CSV file if it does not exist
-if (-not (Test-Path -LiteralPath $CsvFile)) {
-    "cbz;original_size;compression_date;status;optimized_size" | Out-File -LiteralPath $CsvFile -Encoding UTF8
-}
-
-# Load list of CBZ to process (each line: 'full\path\file.cbz : description...')
-if (-not (Test-Path -LiteralPath $InputList)) {
-    Write-Error "Input list '$InputList' not found."
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    Write-Host "ERROR: This script requires PowerShell 7+ (ForEach-Object -Parallel)." -ForegroundColor Red
     exit 1
 }
 
-$cbzList = Get-Content -LiteralPath $InputList -ErrorAction Stop
+Write-Host "Starting CBZ optimization REAL MODE with throttle limit $Throttle"
 
-# Helper: detect archive type from first bytes
-function Get-CbzArchiveType {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
+if (-not (Test-Path $InputList)) {
+    Write-Host "Input list '$InputList' not found. Nothing to do." -ForegroundColor Yellow
+    exit 0
+}
 
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return "missing"
-    }
+# Ensure CSV exists with header
+if (-not (Test-Path $CsvFile)) {
+    "cbz;original_size;compression_date;status;optimized_size" | Out-File $CsvFile -Encoding UTF8
+}
 
-    $fs = [System.IO.File]::OpenRead($Path)
-    try {
-        $bytes = New-Object byte[] 8
-        $read = $fs.Read($bytes, 0, $bytes.Length)
+# Load existing CSV into a map keyed by cbz path
+$existingMap = @{}
+$existingRows = @()
 
-        if ($read -lt 4) { return "unknown" }
-
-        # ZIP signature: 50 4B 03 04
-        if ($bytes[0] -eq 0x50 -and
-            $bytes[1] -eq 0x4B -and
-            $bytes[2] -eq 0x03 -and
-            $bytes[3] -eq 0x04) {
-            return "zip"
+if (Test-Path $CsvFile) {
+    $existingRows = Import-Csv $CsvFile -Delimiter ";"
+    foreach ($row in $existingRows) {
+        if ($null -ne $row.cbz -and $row.cbz.Trim() -ne "") {
+            $existingMap[$row.cbz] = $row
         }
-
-        # RAR v4: 52 61 72 21 1A 07 00
-        if ($read -ge 7 -and
-            $bytes[0] -eq 0x52 -and
-            $bytes[1] -eq 0x61 -and
-            $bytes[2] -eq 0x72 -and
-            $bytes[3] -eq 0x21 -and
-            $bytes[4] -eq 0x1A -and
-            $bytes[5] -eq 0x07 -and
-            $bytes[6] -eq 0x00) {
-            return "rar"
-        }
-
-        # RAR v5: 52 61 72 21 1A 07 01 00
-        if ($read -ge 8 -and
-            $bytes[0] -eq 0x52 -and
-            $bytes[1] -eq 0x61 -and
-            $bytes[2] -eq 0x72 -and
-            $bytes[3] -eq 0x21 -and
-            $bytes[4] -eq 0x1A -and
-            $bytes[5] -eq 0x07 -and
-            $bytes[6] -eq 0x01 -and
-            $bytes[7] -eq 0x00) {
-            return "rar"
-        }
-
-        return "unknown"
-    }
-    finally {
-        $fs.Dispose()
     }
 }
 
-# Detect ImageMagick (magick.exe) once in parent scope
-$magickCmd = Get-Command magick -ErrorAction SilentlyContinue
-$magickAvailable = $null -ne $magickCmd
+# Detect external tools once (to avoid overhead inside parallel runs)
+$magickAvailable   = (Get-Command magick -ErrorAction SilentlyContinue) -ne $null
+$sevenZipAvailable = (Get-Command 7z     -ErrorAction SilentlyContinue) -ne $null
 
-Write-Host "ImageMagick available: $magickAvailable"
-Write-Host "Starting CBZ optimization with throttle limit $ThrottleLimit"
+if (-not $sevenZipAvailable) {
+    Write-Host "WARNING: 7z.exe not found in PATH. RAR/CBR faux CBZ cannot be processed." -ForegroundColor Yellow
+}
 
-$cbzList | ForEach-Object -Parallel {
-    param($line, $CsvFile, $magickAvailable)
+if (-not $magickAvailable) {
+    Write-Host "WARNING: magick (ImageMagick) not found in PATH. Non-JPG images will not be converted." -ForegroundColor Yellow
+}
 
-    # Each line: 'full\path\file.cbz : description...'
-    $cbzPath = $line.Split(" : ", 2)[0].Trim()
-    if (-not $cbzPath) { return }
+# Extensions for images that may be converted to JPG (JPG/JPEG are intentionally excluded)
+$imageExts = ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff"
 
-    # Reload CSV in this runspace
-    $csv = Import-Csv -LiteralPath $CsvFile -Delimiter ";"
+# Build jobs list from unattended_cbz.txt, skipping already-successful/ongoing entries
+$rawLines = Get-Content $InputList | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
-    $entry = $csv | Where-Object { $_.cbz -eq $cbzPath }
-    if (-not $entry) {
-        $entry = [PSCustomObject]@{
-            cbz              = $cbzPath
-            original_size    = 0
-            compression_date = ""
-            status           = ""
-            optimized_size   = 0
+$jobs = foreach ($line in $rawLines) {
+    $cbzPath = $line.Split(" : ")[0].Trim()
+    if (-not $cbzPath) { continue }
+
+    if ($existingMap.ContainsKey($cbzPath)) {
+        $s = $existingMap[$cbzPath].status
+        if ($s -eq "success" -or $s -eq "ongoing") {
+            continue
         }
-        $csv += $entry
     }
 
-    if ($entry.status -eq "success" -or $entry.status -eq "ongoing") {
-        return
+    [PSCustomObject]@{
+        Line = $line
+        Cbz  = $cbzPath
+    }
+}
+
+if (-not $jobs -or $jobs.Count -eq 0) {
+    Write-Host "Nothing to process (no new CBZ to optimize)." -ForegroundColor Green
+    exit 0
+}
+
+# Parallel processing block
+$results = $jobs | ForEach-Object -Parallel {
+    param($job)
+
+    # --- Local helper: detect archive type based on signature ---
+    function Get-CbzArchiveType {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$Path
+        )
+
+        if (-not (Test-Path $Path)) {
+            return "missing"
+        }
+
+        $fs = [System.IO.File]::OpenRead($Path)
+        try {
+            $bytes = New-Object byte[] 8
+            $read  = $fs.Read($bytes, 0, $bytes.Length)
+
+            if ($read -lt 4) {
+                return "unknown"
+            }
+
+            # ZIP : 50 4B 03 04
+            if ($bytes[0] -eq 0x50 -and
+                $bytes[1] -eq 0x4B -and
+                $bytes[2] -eq 0x03 -and
+                $bytes[3] -eq 0x04) {
+                return "zip"
+            }
+
+            # RAR v4 : 52 61 72 21 1A 07 00
+            if ($read -ge 7 -and
+                $bytes[0] -eq 0x52 -and
+                $bytes[1] -eq 0x61 -and
+                $bytes[2] -eq 0x72 -and
+                $bytes[3] -eq 0x21 -and
+                $bytes[4] -eq 0x1A -and
+                $bytes[5] -eq 0x07 -and
+                $bytes[6] -eq 0x00) {
+                return "rar"
+            }
+
+            # RAR v5 : 52 61 72 21 1A 07 01 00
+            if ($read -ge 8 -and
+                $bytes[0] -eq 0x52 -and
+                $bytes[1] -eq 0x61 -and
+                $bytes[2] -eq 0x72 -and
+                $bytes[3] -eq 0x21 -and
+                $bytes[4] -eq 0x1A -and
+                $bytes[5] -eq 0x07 -and
+                $bytes[6] -eq 0x01 -and
+                $bytes[7] -eq 0x00) {
+                return "rar"
+            }
+
+            return "unknown"
+        }
+        finally {
+            $fs.Dispose()
+        }
     }
 
-    $entry.status           = "ongoing"
-    $entry.compression_date = (Get-Date).ToString("s")
-    $csv | Export-Csv -LiteralPath $CsvFile -Delimiter ";" -NoTypeInformation -Encoding UTF8
+    $cbzPath = $job.Cbz
+
+    $result = [PSCustomObject]@{
+        cbz              = $cbzPath
+        original_size    = 0
+        compression_date = (Get-Date).ToString("s")
+        status           = ""
+        optimized_size   = 0
+    }
+
+    if (-not (Test-Path $cbzPath)) {
+        Write-Host "[REAL] Missing file: $cbzPath" -ForegroundColor Yellow
+        $result.status = "fail"
+        return $result
+    }
+
+    try {
+        $result.original_size = (Get-Item $cbzPath).Length
+    }
+    catch {
+        $result.original_size = 0
+    }
 
     $tmp = $null
+
     try {
-        if (-not (Test-Path -LiteralPath $cbzPath)) {
-            throw "File not found: $cbzPath"
-        }
+        # Temp folder
+        $tmp = Join-Path -Path $env:TEMP -ChildPath ("cbzopt_" + [guid]::NewGuid().ToString())
+        New-Item -ItemType Directory -Path $tmp | Out-Null
 
-        $originalSize = (Get-Item -LiteralPath $cbzPath).Length
-        $entry.original_size = $originalSize
-
-        # Create temp directory
-        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("cbzopt_" + [guid]::NewGuid().ToString())
-        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-
-        # Detect archive type
+        # Detect archive type: ZIP vs RAR (faux CBZ)
         $type = Get-CbzArchiveType -Path $cbzPath
-        if ($type -eq "missing") {
-            throw "File missing: $cbzPath"
-        }
 
         switch ($type) {
             "zip" {
                 [System.IO.Compression.ZipFile]::ExtractToDirectory($cbzPath, $tmp)
             }
             "rar" {
-                # Faux CBZ -> extract with 7z (must be in PATH)
-                $7z = Get-Command 7z -ErrorAction SilentlyContinue
-                if (-not $7z) {
-                    throw "7z command not found in PATH. Cannot extract RAR-based CBZ: $cbzPath"
+                if (-not $using:sevenZipAvailable) {
+                    throw "7z.exe not found in PATH but required to extract RAR/CBR faux CBZ."
                 }
-                & $7z.Source x -y "-o$tmp" -- $cbzPath | Out-Null
+                # Faux CBZ -> extract with 7z, then re-compress into a proper CBZ
+                & 7z x -y "-o$tmp" -- "$cbzPath" | Out-Null
+            }
+            "missing" {
+                throw "File reported missing while re-checking: $cbzPath"
             }
             default {
-                throw "Unknown archive type for $cbzPath: $type"
+                throw "Unknown archive type for $cbzPath : $type"
             }
         }
 
-        # Decide whether to convert images or only change container
-        $shouldConvertImages = $true
-        if ($type -eq "rar") {
-            # For faux CBZ: if only JPG/JPEG images are present, do NOT reconvert them
-            $allImageExts = @(".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff")
-            $imageFiles = Get-ChildItem -Path $tmp -Recurse -File |
-                Where-Object { $allImageExts -contains $_.Extension.ToLowerInvariant() }
-
-            $hasNonJpg = $imageFiles | Where-Object {
-                $_.Extension.ToLowerInvariant() -notin @(".jpg", ".jpeg")
-            }
-
-            if (-not $hasNonJpg) {
-                # Faux CBZ with only JPG/JPEG images
-                $shouldConvertImages = $false
-            }
-        }
-
-        # Convert non-JPG images (PNG/WEBP/BMP/etc.) to JPG if requested
-        if ($magickAvailable -and $shouldConvertImages) {
-            $imageExtsToConvert = @(".png", ".gif", ".bmp", ".webp", ".tif", ".tiff")
-
+        # --- Image conversion step ---
+        # Only non-JPG/JPEG formats listed in $using:imageExts are converted to JPG.
+        if ($using:magickAvailable) {
             Get-ChildItem -Path $tmp -Recurse -File |
-                Where-Object { $imageExtsToConvert -contains $_.Extension.ToLowerInvariant() } |
+                Where-Object { $using:imageExts -contains $_.Extension.ToLowerInvariant() } |
                 ForEach-Object {
                     $src = $_.FullName
-                    $dir = Split-Path $src -Parent
-                    $base = [System.IO.Path]::GetFileNameWithoutExtension($src)
-                    $dest = Join-Path $dir ($base + ".jpg")
+                    $dst = [System.IO.Path]::ChangeExtension($src, ".jpg")
 
-                    # Convert with ImageMagick, modest quality to keep size low
-                    & magick $src "-quality" "90" $dest
+                    # Avoid overwriting an existing JPG/JPEG
+                    if (Test-Path $dst) {
+                        $dst = [System.IO.Path]::Combine(
+                            [System.IO.Path]::GetDirectoryName($dst),
+                            ([System.IO.Path]::GetFileNameWithoutExtension($dst) + "_jpg" + ".jpg")
+                        )
+                    }
 
-                    if (Test-Path -LiteralPath $dest) {
-                        Remove-Item -LiteralPath $src -Force
+                    & magick "$src" -quality 90 "$dst"
+                    if ($LASTEXITCODE -eq 0 -and (Test-Path $dst)) {
+                        Remove-Item $src -Force
                     }
                 }
         }
+        else {
+            Write-Host "[REAL] magick not available, non-JPG images left as-is for $cbzPath" -ForegroundColor Yellow
+        }
 
-        # Rebuild CBZ as ZIP (STORE / NoCompression)
+        # --- Recreate optimized CBZ (ZIP, NoCompression) ---
         $optPath = "$cbzPath.opt"
-        if (Test-Path -LiteralPath $optPath) {
-            Remove-Item -LiteralPath $optPath -Force
+        if (Test-Path $optPath) {
+            Remove-Item $optPath -Force
         }
 
         $zipStream = [System.IO.File]::Open($optPath, [System.IO.FileMode]::Create)
-        $zip = [System.IO.Compression.ZipArchive]::new(
+        $zip       = [System.IO.Compression.ZipArchive]::new(
             $zipStream,
             [System.IO.Compression.ZipArchiveMode]::Create,
             $false
@@ -206,12 +248,10 @@ $cbzList | ForEach-Object -Parallel {
 
         try {
             Get-ChildItem -Path $tmp -Recurse -File | ForEach-Object {
-                $full = $_.FullName
-                $rel  = $full.Substring($tmp.Length).TrimStart('\','/')
-
-                $entryZip = $zip.CreateEntry($rel, [System.IO.Compression.CompressionLevel]::NoCompression)
+                $relPath     = $_.FullName.Substring($tmp.Length).TrimStart('\', '/')
+                $entryZip    = $zip.CreateEntry($relPath, [System.IO.Compression.CompressionLevel]::NoCompression)
                 $entryStream = $entryZip.Open()
-                $fileStream  = [System.IO.File]::OpenRead($full)
+                $fileStream  = [System.IO.File]::OpenRead($_.FullName)
                 try {
                     $fileStream.CopyTo($entryStream)
                 }
@@ -226,27 +266,51 @@ $cbzList | ForEach-Object -Parallel {
             $zipStream.Dispose()
         }
 
-        $optimizedSize = (Get-Item -LiteralPath $optPath).Length
-        $entry.optimized_size = $optimizedSize
-
-        if ($optimizedSize -lt $originalSize) {
-            Move-Item -LiteralPath $optPath -Destination $cbzPath -Force
-            $entry.status = "success"
+        if (Test-Path $optPath) {
+            $result.optimized_size = (Get-Item $optPath).Length
         }
         else {
-            Remove-Item -LiteralPath $optPath -Force
-            $entry.status = "fail"
+            $result.optimized_size = 0
+        }
+
+        if ($result.original_size -gt 0 -and
+            $result.optimized_size -gt 0 -and
+            $result.optimized_size -lt $result.original_size) {
+
+            # Keep optimized file
+            Move-Item -Force $optPath $cbzPath
+            $result.status = "success"
+        }
+        else {
+            # Optimization not beneficial or failed -> discard .opt
+            if (Test-Path $optPath) {
+                Remove-Item $optPath -Force
+            }
+            $result.status = "fail"
         }
     }
     catch {
-        $entry.status = "fail"
-        Write-Warning "Error processing $cbzPath : $($_.Exception.Message)"
+        Write-Host "[REAL] Error on $cbzPath : $($_.Exception.Message)" -ForegroundColor Red
+        $result.status = "fail"
     }
     finally {
-        if ($tmp -and (Test-Path -LiteralPath $tmp)) {
-            Remove-Item -LiteralPath $tmp -Recurse -Force
+        if ($tmp -and (Test-Path $tmp)) {
+            Remove-Item $tmp -Recurse -Force
         }
-        $csv | Export-Csv -LiteralPath $CsvFile -Delimiter ";" -NoTypeInformation -Encoding UTF8
     }
 
-} -ThrottleLimit $ThrottleLimit -ArgumentList $CsvFile, $magickAvailable
+    return $result
+
+} -ThrottleLimit $Throttle
+
+# Merge results back into the existing map and write CSV once
+foreach ($r in $results) {
+    if ($null -ne $r.cbz -and $r.cbz.Trim() -ne "") {
+        $existingMap[$r.cbz] = $r
+    }
+}
+
+$finalRows = $existingMap.GetEnumerator() | ForEach-Object { $_.Value } | Sort-Object cbz
+$finalRows | Export-Csv $CsvFile -Delimiter ";" -NoTypeInformation -Encoding UTF8
+
+Write-Host "REAL optimization complete for $($results.Count) CBZ file(s)." -ForegroundColor Green

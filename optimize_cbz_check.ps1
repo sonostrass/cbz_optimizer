@@ -73,6 +73,34 @@ function Get-CbzArchiveType {
     }
 }
 
+function Show-Progress {
+    param(
+        [int]$Current,
+        [int]$Total,
+        [string]$Folder
+    )
+
+    $line = ("[{0}/{1}] Scanning {2}" -f $Current, $Total, $Folder)
+    $width = $Host.UI.RawUI.WindowSize.Width
+    if ($line.Length -gt $width) {
+        $line = $line.Substring(0, $width - 1)
+    }
+
+    Write-Host "`r$line" -NoNewline
+}
+
+function Show-ResultLine {
+    param(
+        [string]$Message,
+        [string]$Color = "Yellow"
+    )
+
+    # Finaliser la ligne de progression actuelle
+    Write-Host ""
+    # Afficher la ligne de résultat (KO / info)
+    Write-Host $Message -ForegroundColor $Color
+}
+
 # Résolution du chemin racine
 $rootFull = (Resolve-Path $Root).Path
 
@@ -86,14 +114,8 @@ $folderIndex = 0
 foreach ($folder in $folders) {
     $folderIndex++
 
-    # Ligne de progression sur une seule ligne
-    $progressLine = ("[{0}/{1}] Scanning {2}" -f $folderIndex, $folderCount, $folder)
-    $width = $Host.UI.RawUI.WindowSize.Width
-    if ($progressLine.Length -ge $width) {
-        $progressLine = $progressLine.Substring(0, $width - 1)
-    }
-
-    Write-Host "`r$progressLine" -NoNewline
+    # Afficher la progression sur une seule ligne (sera remplacée au fur et à mesure)
+    Show-Progress -Current $folderIndex -Total $folderCount -Folder $folder
 
     # Fichiers .cbz dans ce dossier
     $cbzFiles = Get-ChildItem -Path $folder -File -Filter *.cbz -ErrorAction SilentlyContinue
@@ -127,14 +149,16 @@ foreach ($folder in $folders) {
 
                             $summary = $grouped -join ", "
                             $msg = "$($cbz.FullName) : inattendu -> $summary"
+
+                            # KO → on garde la ligne et on log
+                            Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
+                            Add-Content -Path $LogFile -Value $msg
                         }
                         else {
+                            # CBZ OK : on log en silence, sans casser la progression
                             $msg = "$($cbz.FullName) : OK"
+                            Add-Content -Path $LogFile -Value $msg
                         }
-
-                        Write-Host ""
-                        Write-Host "[INFO] $msg" -ForegroundColor Yellow
-                        Add-Content -Path $LogFile -Value $msg
                     }
                     finally {
                         $zip.Dispose()
@@ -142,32 +166,32 @@ foreach ($folder in $folders) {
                 }
                 "rar" {
                     $msg = "$($cbz.FullName) : faux CBZ (archive RAR)"
-                    Write-Host ""
-                    Write-Host "[WARNING] $msg" -ForegroundColor Yellow
+                    Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
                     Add-Content -Path $LogFile -Value $msg
                 }
                 "missing" {
                     $msg = "$($cbz.FullName) : fichier introuvable (signalé mais disparu)"
-                    Write-Host ""
-                    Write-Host "[WARNING] $msg" -ForegroundColor Yellow
+                    Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
                     Add-Content -Path $LogFile -Value $msg
                 }
                 default {
                     $msg = "$($cbz.FullName) : en-tête binaire inattendu (ni ZIP ni RAR)"
-                    Write-Host ""
-                    Write-Host "[WARNING] $msg" -ForegroundColor Yellow
+                    Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
                     Add-Content -Path $LogFile -Value $msg
                 }
             }
         }
         catch {
             $msg = "$($cbz.FullName) : erreur pendant l'analyse - $($_.Exception.Message)"
-            Write-Host ""
-            Write-Host "[WARNING] $msg" -ForegroundColor Yellow
+            Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
             Add-Content -Path $LogFile -Value $msg
         }
+
+        # Après chaque CBZ, la progression sera réaffichée à la prochaine itération
+        # via Show-Progress au début de la boucle de dossier (ou du prochain CBZ)
     }
 }
 
+# Finaliser la progression et afficher le message de fin
 Write-Host ""
 Write-Host "`nScan complete. Results saved to $LogFile" -ForegroundColor Green
