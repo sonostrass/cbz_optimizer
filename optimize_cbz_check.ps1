@@ -11,7 +11,7 @@ param(
 $allowed = @(".jpg", ".jpeg", ".xml", ".css", ".html")
 
 # On vide le fichier de log au démarrage
-Set-Content -Path $LogFile -Value "" -Encoding 1252
+Set-Content -Path $LogFile -Value ""
 
 # Pour ouvrir les .cbz comme des .zip
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -155,9 +155,8 @@ foreach ($folder in $folders) {
                             Add-Content -Path $LogFile -Value $msg -Encoding 1252
                         }
                         else {
-                            # CBZ OK : on log en silence, sans casser la progression
-                            $msg = "$($cbz.FullName) : OK"
-                            Add-Content -Path $LogFile -Value $msg -Encoding 1252
+                            # CBZ OK : rien à écrire dans $LogFile
+                            # (on ne conserve dans le .txt que les CBZ à modifier)
                         }
                     }
                     finally {
@@ -167,24 +166,24 @@ foreach ($folder in $folders) {
                 "rar" {
                     $msg = "$($cbz.FullName) : faux CBZ (archive RAR)"
                     Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
-                    Add-Content -Path $LogFile -Value $msg -Encoding 1252
+                    Add-Content -Path $LogFile -Value $msg
                 }
                 "missing" {
                     $msg = "$($cbz.FullName) : fichier introuvable (signalé mais disparu)"
                     Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
-                    Add-Content -Path $LogFile -Value $msg -Encoding 1252
+                    Add-Content -Path $LogFile -Value $msg
                 }
                 default {
                     $msg = "$($cbz.FullName) : en-tête binaire inattendu (ni ZIP ni RAR)"
                     Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
-                    Add-Content -Path $LogFile -Value $msg -Encoding 1252
+                    Add-Content -Path $LogFile -Value $msg
                 }
             }
         }
         catch {
             $msg = "$($cbz.FullName) : erreur pendant l'analyse - $($_.Exception.Message)"
             Show-ResultLine -Message "[WARNING] $msg" -Color "Yellow"
-            Add-Content -Path $LogFile -Value $msg -Encoding 1252
+            Add-Content -Path $LogFile -Value $msg
         }
 
         # Après chaque CBZ, la progression sera réaffichée à la prochaine itération
