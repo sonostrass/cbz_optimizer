@@ -10,6 +10,10 @@ param(
 # Extensions autorisées (en minuscules)
 $allowed = @(".jpg", ".jpeg", ".xml", ".css", ".html")
 
+# Extensions d'images connues (utilisées pour la règle des 10%)
+$imageExts = @(".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tif", ".tiff")
+
+
 # On vide le fichier de log au démarrage
 Set-Content -Path $LogFile -Value "" -Encoding 1252
 
@@ -129,7 +133,9 @@ foreach ($folder in $folders) {
                     # Analyse du contenu ZIP pour trouver des extensions inattendues (résumé par extension)
                     $zip = [System.IO.Compression.ZipFile]::OpenRead($cbz.FullName)
                     try {
-                        $unexpectedExts = @()
+                        $unexpectedExts       = @()
+                        $totalImages          = 0
+                        $unexpectedImageCount = 0
 
                         foreach ($entry in $zip.Entries) {
                             if ([string]::IsNullOrWhiteSpace($entry.FullName)) { continue }
@@ -137,12 +143,43 @@ foreach ($folder in $folders) {
 
                             $ext = [System.IO.Path]::GetExtension($entry.FullName).ToLowerInvariant()
 
+                            # Comptage du nombre total d'images dans le CBZ
+                            if ($imageExts -contains $ext) {
+                                $totalImages++
+                            }
+
+                            # Extensions non autorisées (toutes catégories confondues)
                             if (-not $allowed.Contains($ext)) {
                                 $unexpectedExts += $ext
+
+                                # Parmi ces fichiers inattendus, on isole les IMAGES inattendues
+                                if ($imageExts -contains $ext) {
+                                    $unexpectedImageCount++
+                                }
                             }
                         }
 
+                        $shouldLog = $false
+
                         if ($unexpectedExts.Count -gt 0) {
+                            if ($totalImages -le 0) {
+                                # Pas d'images détectées : on considère le fichier suspect -> on log
+                                $shouldLog = $true
+                            }
+                            else {
+                                # Règle des 10% :
+                                # - On ne se préoccupe que des fichiers IMAGE inattendus.
+                                # - Si le nombre d'IMAGES inattendues est < 10 % du nombre total d'images,
+                                #   on ignore le CBZ (pas de correction).
+                                # - Sinon (>= 10 %), on considère le CBZ à corriger -> on log.
+                                $ratio = [double]$unexpectedImageCount / [double]$totalImages
+                                if ($ratio -ge 0.1) {
+                                    $shouldLog = $true
+                                }
+                            }
+                        }
+
+                        if ($shouldLog) {
                             $grouped = $unexpectedExts |
                                 Group-Object |
                                 ForEach-Object { "{0}:{1}" -f $_.Name.TrimStart('.'), $_.Count }
@@ -155,9 +192,8 @@ foreach ($folder in $folders) {
                             Add-Content -Path $LogFile -Value $msg -Encoding 1252
                         }
                         else {
-                            # CBZ OK : on log en silence, sans casser la progression
-                            $msg = "$($cbz.FullName) : OK"
-                            Add-Content -Path $LogFile -Value $msg -Encoding 1252
+                            # CBZ OK (ou trop peu d'images inattendues < 10%) : ne rien écrire dans le log
+                            # Le changement de conteneur (faux CBZ RAR -> vrai CBZ ZIP) reste géré ailleurs.
                         }
                     }
                     finally {

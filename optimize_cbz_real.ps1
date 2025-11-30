@@ -91,8 +91,24 @@ if (-not $jobs -or $jobs.Count -eq 0) {
 }
 
 # Parallel processing block
+
+# Shared progress counter across parallel runspaces
+Add-Type -TypeDefinition @"
+public static class CbzProgressCounter {
+    public static int Counter = 0;
+}
+"@ -ErrorAction SilentlyContinue
+
+$TotalJobs = $jobs.Count
+
 $results = $jobs | ForEach-Object -Parallel {
     $job = $_
+
+    # Increment and display progress (thread-safe across runspaces)
+    $currentIndex = [System.Threading.Interlocked]::Increment([ref][CbzProgressCounter]::Counter)
+    Write-Host ("[REAL] {0}/{1} - {2}" -f $currentIndex, $using:TotalJobs, $job.Cbz) -ForegroundColor Cyan
+
+
 
     # --- Local helper: detect archive type based on signature ---
     function Get-CbzArchiveType {
@@ -223,7 +239,7 @@ $results = $jobs | ForEach-Object -Parallel {
                         )
                     }
 
-                    & magick "$src" -quality 90 "$dst"
+                    & magick "$src" -strip -sampling-factor 4:2:0 -define jpeg:optimize-coding=true -quality 85 "$dst"
                     if ($LASTEXITCODE -eq 0 -and (Test-Path $dst)) {
                         Remove-Item $src -Force
                     }

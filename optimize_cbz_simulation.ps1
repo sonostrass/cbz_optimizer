@@ -100,7 +100,7 @@ $results = $jobs | ForEach-Object -Parallel {
     if ($result.original_size -gt 0) {
         # Simulate an optimization ratio between 0.5 and 1.2
         $rand = Get-Random -Minimum 0.5 -Maximum 1.2
-        $result.optimized_size = [int]($result.original_size * $rand)
+        $result.optimized_size = [int64]($result.original_size * $rand)
     }
     else {
         $result.optimized_size = 0
